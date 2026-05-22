@@ -19,6 +19,10 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
 
   db:
     image: postgres:18
@@ -37,6 +41,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
 
   redis:
     image: redis:8
@@ -62,21 +70,31 @@ services:
     restart: unless-stopped
     networks:
       - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
 
   prometheus:
     image: prom/prometheus:v3.11.0
     container_name: prometheus
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
     ports:
       - "9090:9090"
     restart: unless-stopped
     networks:
       - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
 
   grafana:
     image: grafana/grafana:13.0.1
@@ -94,6 +112,92 @@ services:
       - app-net
     depends_on:
       - prometheus
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
+    container_name: cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    privileged: true
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
+  node-exporter:
+    image: prom/node-exporter:v1.11.1
+    container_name: node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)'
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
+  loki:
+    image: grafana/loki:3.7.2
+    container_name: loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+      - ./monitoring/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+    command: -config.file=/etc/loki/loki-config.yaml
+    restart: unless-stopped
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
+  alloy:
+    image: grafana/alloy:v1.16.1
+    container_name: alloy
+    ports:
+      - "12345:12345"
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/tmp/alloy /etc/alloy/config.alloy
+    restart: unless-stopped
+    networks:
+      - app-net
+    depends_on:
+      - loki
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
 
 volumes:
   docmost:
@@ -101,6 +205,7 @@ volumes:
   redis_data:
   prometheus_data:
   grafana_data:
+  loki_data:
 
 networks:
   app-net:

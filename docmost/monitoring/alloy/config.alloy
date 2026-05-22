@@ -1,0 +1,52 @@
+// === 1. Находим JSON-логи докера на хосте ===
+local.file_match "docker_logs" {
+  path_targets = [
+    {
+      __path__ = "/var/lib/docker/containers/*/*-json.log",
+    },
+  ]
+}
+
+// === 2. Читаем и парсим логи ===
+loki.source.file "collect" {
+  targets    = local.file_match.docker_logs.targets
+  forward_to = [loki.process.parser.receiver]
+}
+
+// === 3. Парсим JSON-логи докера и добавляем лейблы ===
+loki.process "parser" {
+  stage.json {
+    expressions = {
+      output = "log",
+      stream = "stream",
+      attrs = "attrs",
+      tag = "attrs.tag",
+      time = "time",
+    }
+  }
+
+  stage.labels {
+    values = {
+      stream = "",
+      container = "tag",
+    }
+  }
+
+  stage.timestamp {
+    source = "time"
+    format = "RFC3339Nano"
+  }
+
+  stage.output {
+    source = "output"
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+// === 4. Отправляем в Loki ===
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
