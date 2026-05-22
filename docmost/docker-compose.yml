@@ -199,6 +199,74 @@ services:
       options:
         tag: "{{.Name}}"
 
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.28.0
+    container_name: blackbox-exporter
+    ports:
+      - "9115:9115"
+    volumes:
+      - ./monitoring/blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    command:
+      - '--config.file=/etc/blackbox_exporter/config.yml'
+    restart: unless-stopped
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    container_name: postgres-exporter
+    ports:
+      - "9187:9187"
+    environment:
+      - DATA_SOURCE_NAME=postgresql://docmost:${DB_PASSWORD}@db:5432/docmost?sslmode=disable
+    depends_on:
+      - db
+    restart: unless-stopped
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.82.0
+    container_name: redis-exporter
+    ports:
+      - "9121:9121"
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.5.1
+    container_name: nginx-exporter
+    ports:
+      - "9113:9113"
+    command:
+      - '-nginx.scrape-uri=http://nginx:80/stub_status'
+    depends_on:
+      - nginx
+    restart: unless-stopped
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
 volumes:
   docmost:
   db_data:
