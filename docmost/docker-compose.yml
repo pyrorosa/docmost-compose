@@ -188,6 +188,9 @@ services:
       - ./monitoring/alertmanager/templates:/etc/alertmanager/templates:ro
       - alertmanager_data:/alertmanager
     environment:
+      - HTTP_PROXY=${http_proxy}
+      - HTTPS_PROXY=${https_proxy}
+      - NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,172.16.0.0/12,::1,*.local,docker.internal,api.telegram.org,app-net,prometheus,grafana,loki,alloy
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
     command:
