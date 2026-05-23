@@ -178,6 +178,25 @@ services:
       options:
         tag: "{{.Name}}"
 
+  alertmanager:
+    image: prom/alertmanager:v0.32.1
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    restart: unless-stopped
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
   alloy:
     image: grafana/alloy:v1.16.1
     container_name: alloy
