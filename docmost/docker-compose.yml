@@ -178,32 +178,6 @@ services:
       options:
         tag: "{{.Name}}"
 
-  alertmanager:
-    image: prom/alertmanager:v0.32.1
-    container_name: alertmanager
-    ports:
-      - "9093:9093"
-    volumes:
-      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      - ./monitoring/alertmanager/templates:/etc/alertmanager/templates:ro
-      - alertmanager_data:/alertmanager
-    environment:
-      - HTTP_PROXY=${http_proxy}
-      - HTTPS_PROXY=${https_proxy}
-      - NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,172.16.0.0/12,::1,*.local,docker.internal,api.telegram.org,app-net,prometheus,grafana,loki,alloy
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-    command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager'
-    restart: unless-stopped
-    networks:
-      - app-net
-    logging:
-      driver: json-file
-      options:
-        tag: "{{.Name}}"
-
   alloy:
     image: grafana/alloy:v1.16.1
     container_name: alloy
@@ -220,6 +194,36 @@ services:
       - app-net
     depends_on:
       - loki
+    logging:
+      driver: json-file
+      options:
+        tag: "{{.Name}}"
+
+  alertmanager:
+    image: prom/alertmanager:v0.32.1
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./monitoring/alertmanager/templates:/etc/alertmanager/templates:ro
+      - alertmanager_data:/alertmanager
+    environment:
+      - HTTP_PROXY=${http_proxy}
+      - HTTPS_PROXY=${https_proxy}
+      - NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,172.16.0.0/12,::1,*.local,docker.internal,api.telegram.org,app-net,prometheus,grafana,loki,alloy
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        cp /etc/alertmanager/alertmanager.yml /tmp/alertmanager.yml &&
+        sed -i 's|$${TELEGRAM_BOT_TOKEN}|'"$${TELEGRAM_BOT_TOKEN}"'|g' /tmp/alertmanager.yml &&
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
+    restart: unless-stopped
+    networks:
+      - app-net
     logging:
       driver: json-file
       options:
