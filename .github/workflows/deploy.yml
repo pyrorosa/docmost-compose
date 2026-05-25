@@ -1,0 +1,348 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main, Docmost]
+  pull_request:
+    branches: [main, Docmost]
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  COMPOSE_FILE: docmost/docker-compose.yml
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: YAML lint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_data: |
+            extends: default
+            rules:
+              line-length: disable
+              document-start: disable
+              truthy: disable
+
+      - name: Validate docker-compose
+        run: |
+          set +e
+
+          OUTPUT=$(docker compose -f ${{ env.COMPOSE_FILE }} config 2>&1)
+
+          EXIT_CODE=$?
+
+          set -e
+
+          if [ $EXIT_CODE -ne 0 ] && ! echo "$OUTPUT" | grep -q "env file.*not found\|variable.*not set"; then
+            echo "$OUTPUT"
+            exit 1
+          fi
+
+      - name: Validate Prometheus rules
+        run: |
+          docker run --rm \
+            --entrypoint /bin/promtool \
+            -v $(pwd)/docmost/monitoring/prometheus:/etc/prometheus:ro \
+            prom/prometheus:latest \
+            check rules /etc/prometheus/rules/alerts.yml
+
+      - name: Validate Loki config
+        run: |
+          docker run --rm \
+            -v $(pwd)/docmost/monitoring/loki:/etc/loki:ro \
+            grafana/loki:3.7.2 \
+            -config.file=/etc/loki/loki-config.yaml \
+            -verify-config=true
+
+      - name: Validate Nginx config
+        run: |
+          docker run --rm \
+            --entrypoint nginx \
+            -v $(pwd)/docmost/nginx/conf.d:/etc/nginx/conf.d:ro \
+            nginx:1.29.3-alpine \
+            -t
+
+      - name: Validate Blackbox config
+        run: |
+          docker run --rm \
+            -v $(pwd)/docmost/monitoring/blackbox:/config:ro \
+            prom/blackbox-exporter:v0.28.0 \
+            --config.check \
+            --config.file=/config/blackbox.yml
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: docmost/
+          format: table
+          severity: CRITICAL
+          exit-code: 1
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: prom/prometheus:v3.11.0
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Generate JSON reports
+        if: always()
+        run: |
+          mkdir -p security-reports
+
+          docker run --rm \
+            -v $(pwd):/work \
+            aquasecurity/trivy:latest \
+            config \
+            --format json \
+            --output /work/security-reports/config-report.json \
+            /work/docmost/ || true
+
+          docker run --rm \
+            -v $(pwd):/work \
+            aquasecurity/trivy:latest \
+            image \
+            --format json \
+            --output /work/security-reports/image-report.json \
+            prom/prometheus:v3.11.0 || true
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-security-reports-${{ github.run_number }}
+          path: security-reports/
+          retention-days: 7
+
+  deploy:
+    name: Deploy to Production
+    runs-on: self-hosted
+    timeout-minutes: 30
+    needs: [lint, security]
+    if: github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Fix workspace permissions
+        run: |
+          sudo chown -R vagrant:vagrant /home/vagrant/actions-runner/_work || true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate .env from secrets
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GRAFANA_PASSWORD: ${{ secrets.GRAFANA_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$APP_SECRET" ]; then
+            APP_SECRET=$(openssl rand -base64 32 | tr -d '\n')
+          fi
+
+          cat > docmost/.env << EOF
+          DB_PASSWORD=${DB_PASSWORD}
+          DATABASE_URL=${DATABASE_URL}
+          REDIS_URL=redis://redis:6379
+          APP_SECRET=${APP_SECRET}
+          BASE_URL=http://localhost
+          TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+          TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+          HTTP_PROXY=
+          HTTPS_PROXY=
+          NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,172.16.0.0/12
+          GRAFANA_PASSWORD=${GRAFANA_PASSWORD}
+          EOF
+                    chmod 600 docmost/.env
+
+      - name: Configure Docker
+        run: |
+          sudo mkdir -p /etc/docker
+
+          cat <<EOF | sudo tee /etc/docker/daemon.json > /dev/null
+          {
+            "registry-mirrors": [
+              "https://dockerhub.timeweb.cloud",
+              "https://mirror.gcr.io",
+              "https://registry-1.docker.io"
+            ],
+            "dns": ["8.8.8.8", "1.1.1.1"]
+          }
+          EOF
+
+          sudo systemctl restart docker
+
+      - name: Docker cleanup before deploy
+        run: |
+          docker system prune -af --volumes || true
+
+      - name: Pre-pull images
+        run: |
+          docker pull prom/prometheus:v3.11.0 || true
+          docker pull prom/alertmanager:v0.32.1 || true
+          docker pull grafana/grafana:13.0.1 || true
+          docker pull postgres:18 || true
+          docker pull redis:8 || true
+          docker pull nginx:1.29.3-alpine || true
+
+      - name: Cleanup broken Alertmanager
+        run: |
+          docker compose -f docmost/docker-compose.yml stop alertmanager || true
+
+          docker compose -f docmost/docker-compose.yml rm -f alertmanager || true
+
+      - name: Deploy stack
+        run: |
+          set -e
+
+          docker compose -f docmost/docker-compose.yml pull --ignore-pull-failures || true
+
+          docker compose -f docmost/docker-compose.yml up -d --remove-orphans
+
+          HEALTHY=false
+
+          for i in {1..30}; do
+            if docker compose -f docmost/docker-compose.yml ps docmost | grep -q healthy; then
+              HEALTHY=true
+              echo "Docmost healthy"
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [ "$HEALTHY" = false ]; then
+            echo "Docmost failed healthcheck"
+            exit 1
+          fi
+
+          curl -sf --max-time 10 http://localhost:80
+
+          curl -sf --max-time 10 http://localhost:3001/api/health
+
+          curl -sf --max-time 10 http://localhost:9090/-/healthy
+
+          docker image prune -f --filter="until=24h"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          docker compose -f docmost/docker-compose.yml down || true
+
+          git reset --hard HEAD~1 || true
+
+          docker compose -f docmost/docker-compose.yml up -d || true
+
+      - name: Collect docker logs
+        if: failure()
+        run: |
+          mkdir -p deploy-logs
+
+          docker compose -f docmost/docker-compose.yml ps \
+            > deploy-logs/containers.txt || true
+
+          docker compose -f docmost/docker-compose.yml logs \
+            > deploy-logs/docker-compose.log || true
+
+          docker stats --no-stream \
+            > deploy-logs/docker-stats.txt || true
+
+      - name: Upload deploy logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-logs-${{ github.run_number }}
+          path: deploy-logs/
+          retention-days: 7
+
+      - name: Telegram notification
+        if: always()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ job.status }}" = "success" ]; then
+            STATUS="✅ Deploy successful"
+            RUN_LINK=""
+          else
+            STATUS="❌ Deploy failed"
+            RUN_LINK="🔗 Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "parse_mode=Markdown" \
+            --data-urlencode "text=${STATUS}
+
+          📦 Repository: \`${{ github.repository }}\`
+          🔀 Branch: \`${{ github.ref_name }}\`
+          🔗 Commit: \`${{ github.sha }}\`
+          👤 Author: \`${{ github.actor }}\`
+          ${RUN_LINK}"
+
+  cleanup:
+    name: Cleanup Old Artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: deploy
+    if: always()
+
+    steps:
+      - name: Delete old workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 5
