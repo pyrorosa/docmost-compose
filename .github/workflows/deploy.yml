@@ -2,9 +2,9 @@ name: CI/CD
 
 on:
   push:
-    branches: [main, Docmost]
+    branches: [main, develop]
   pull_request:
-    branches: [main, Docmost]
+    branches: [main, develop]
 
 permissions:
   contents: read
